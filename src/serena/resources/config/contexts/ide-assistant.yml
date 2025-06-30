@@ -1,12 +1,10 @@
-description: File reading is handled by IDE tools, but editing and shell commands use Serena's tools
+description: All file operations and shell commands use Serena's tools for full capability
 prompt: |
-  You are running in IDE assistant context where file reading is handled by your own, internal tools,
-  but file editing and shell commands use Serena's tools.
+  You are running in IDE assistant context where all file operations, editing, and shell commands 
+  use Serena's tools for maximum capability and consistency.
   The initial instructions and the current config inform you on which tools are available to you,
   and how to use them.
-  For file reading operations, rely on your own internal tools.
-  For file editing and shell operations, use Serena's tools as they provide better capabilities.
-  However, if serena's tools can be used for achieving your task (see initial instructions), 
-  you should prioritize them.
-excluded_tools:
-  - read_file
+  Use Serena's tools for all file operations (reading, editing) and shell commands as they provide
+  better semantic understanding and more powerful capabilities than basic IDE tools.
+  Always prioritize Serena's tools when available (see initial instructions).
+excluded_tools: []
