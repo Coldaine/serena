@@ -1,0 +1,36 @@
+gui_log_window: true
+# Enable the graphical log window instead of web dashboard
+# This is supported on Windows and provides a native GUI for monitoring Serena's activity
+
+web_dashboard: false
+# Disable web dashboard since we're using GUI log window instead
+# You can enable both if you want, but GUI is more native on Windows
+
+log_level: 10
+# Log level: 10 = debug, 20 = info, 30 = warning, 40 = error
+# Set to 10 (DEBUG) if you need more detailed troubleshooting information
+
+trace_lsp_communication: false
+# Set to True if you need to debug language server communication issues
+# Warning: This creates very verbose logs, only enable when troubleshooting
+
+tool_timeout: 180
+# Increased timeout to 5 minutes for complex operations
+# Default is 240 seconds, but some operations might need more time
+
+# Additional recommended configurations for better performance and usability
+
+# Note: Many advanced settings are configured per-project in .serena/project.yml files
+# or passed as command-line arguments when starting the server
+
+# MANAGED BY SERENA, KEEP AT THE BOTTOM OF THE YAML AND DON'T EDIT WITHOUT NEED
+# The list of registered projects.
+# To add a project, within a chat, simply ask Serena to "activate the project /path/to/project" or,
+# if the project was previously added, "activate the project <project name>".
+# By default, the project's name will be the name of the directory containing the project, but you may change it
+# by editing the (auto-generated) project configuration file `/path/project/project/.serena/project.yml` file.
+# If you want to maintain full control of the project configuration, create the project.yml file manually and then
+# instruct Serena to activate the project by its path for first-time activation.
+# NOTE: Make sure there are no name collisions in the names of registered projects.
+projects:
+- E:\Serena MCP
