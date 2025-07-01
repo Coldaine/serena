@@ -23,8 +23,14 @@ from functools import cached_property
 from logging import Logger
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional, Self, TypeVar, Union, cast
 
+import asyncio
+import aiofiles
+import json
+import os
+import platform
+import subprocess
 import click
 import yaml
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, func_metadata
@@ -61,8 +67,12 @@ from solidlsp.ls_types import SymbolKind
 if TYPE_CHECKING:
     from serena.gui_log_viewer import GuiLogViewerHandler
 
+# Progress callback type definition for async tool operations
+ProgressCallback = Optional[Callable[[str], Awaitable[None]]]
+
 log = logging.getLogger(__name__)
 TTool = TypeVar("TTool", bound="Tool")
+TAsyncTool = TypeVar("TAsyncTool", bound="AsyncTool")
 T = TypeVar("T")
 SUCCESS_RESULT = "OK"
 DEFAULT_TOOL_TIMEOUT: float = 240
@@ -769,8 +779,8 @@ class SerenaAgent:
                 )
                 Logger.root.addHandler(self._gui_log_handler)
 
-        # instantiate all tool classes
-        self._all_tools: dict[type[Tool], Tool] = {tool_class: tool_class(self) for tool_class in ToolRegistry.get_all_tool_classes()}
+        # instantiate all tool classes (both regular Tool and AsyncTool)
+        self._all_tools: dict[type[Tool] | type[AsyncTool], Tool | AsyncTool] = {tool_class: tool_class(self) for tool_class in ToolRegistry.get_all_tool_classes()}
         tool_names = [tool.get_name_from_cls() for tool in self._all_tools.values()]
 
         # If GUI log window is enabled, set the tool names for highlighting
@@ -816,7 +826,7 @@ class SerenaAgent:
         self._modes = modes
         log.info(f"Loaded tools ({len(self._all_tools)}): {', '.join([tool.get_name_from_cls() for tool in self._all_tools.values()])}")
 
-        self._active_tools: dict[type[Tool], Tool] = {}
+        self._active_tools: dict[type[Tool] | type[AsyncTool], Tool | AsyncTool] = {}
         self._update_active_tools()
 
         # activate a project configuration (if provided or if there is only a single project available)
@@ -878,7 +888,7 @@ class SerenaAgent:
         if self.path_is_gitignored(relative_path):
             raise ValueError(f"File {relative_path} is gitignored, can't read or edit it for safety reasons")
 
-    def get_exposed_tool_instances(self) -> list["Tool"]:
+    def get_exposed_tool_instances(self) -> list["Tool" | "AsyncTool"]:
         """
         :return: all tool instances, including the non-active ones. For MCP clients, we need to expose them all since typical
             clients don't react to changes in the set of tools.
@@ -920,7 +930,7 @@ class SerenaAgent:
         Update the active tools based on context, modes, and project configuration.
         All tool exclusions are merged together.
         """
-        excluded_tool_classes: set[type[Tool]] = set()
+        excluded_tool_classes: set[type[Tool] | type[AsyncTool]] = set()
         # modes
         for mode in self._modes:
             mode_excluded_tool_classes = mode.get_excluded_tool_classes()
@@ -1046,7 +1056,7 @@ class SerenaAgent:
         self._activate_project(project_instance)
         return project_instance, new_project_generated, new_project_config_generated
 
-    def get_active_tool_classes(self) -> list[type["Tool"]]:
+    def get_active_tool_classes(self) -> list[type["Tool"] | type["AsyncTool"]]:
         """
         :return: the list of active tool classes for the current project
         """
@@ -1058,7 +1068,7 @@ class SerenaAgent:
         """
         return sorted([tool.get_name_from_cls() for tool in self.get_active_tool_classes()])
 
-    def tool_is_active(self, tool_class: type["Tool"] | str) -> bool:
+    def tool_is_active(self, tool_class: type["Tool"] | type["AsyncTool"] | str) -> bool:
         """
         :param tool_class: the class or name of the tool to check
         :return: True if the tool is active, False otherwise
@@ -1421,6 +1431,161 @@ class Tool(Component, ToolInterface):
         future = self.agent.issue_task(task, name=self.__class__.__name__)
         return future.result(timeout=self.agent.serena_config.tool_timeout)
 
+class AsyncTool(Component, ToolInterface):
+    """
+    Base class for asynchronous tools that support progress callbacks.
+    These tools yield control during I/O operations to keep the server responsive.
+    """
+
+    @classmethod
+    def get_name_from_cls(cls) -> str:
+        name = cls.__name__
+        if name.endswith("Tool"):
+            name = name[:-4]
+        # convert to snake_case
+        name = "".join(["_" + c.lower() if c.isupper() else c for c in name]).lstrip("_")
+        return name
+
+    def get_name(self) -> str:
+        return self.get_name_from_cls()
+
+    async def get_apply_fn(self) -> Callable:
+        apply_fn = getattr(self, "apply_async")
+        if apply_fn is None:
+            raise RuntimeError(f"apply_async not defined in {self}. Did you forget to implement it?")
+        return apply_fn
+
+    @classmethod
+    def can_edit(cls) -> bool:
+        return issubclass(cls, ToolMarkerCanEdit)
+
+    @classmethod
+    def get_tool_description(cls) -> str:
+        docstring = cls.__doc__
+        if docstring is None:
+            return ""
+        return docstring.strip()
+
+    @classmethod
+    def get_apply_docstring_from_cls(cls) -> str:
+        """Get the docstring for the apply_async method from the class."""
+        if "apply_async" in cls.__dict__:
+            apply_fn = cls.__dict__["apply_async"]
+        else:
+            apply_fn = getattr(cls, "apply_async", None)
+            if apply_fn is None:
+                raise AttributeError(f"apply_async method not defined in {cls}")
+
+        docstring = apply_fn.__doc__
+        if not docstring:
+            raise AttributeError(f"apply_async method has no docstring in {cls}")
+        return docstring.strip()
+
+    def get_apply_docstring(self) -> str:
+        return self.get_apply_docstring_from_cls()
+
+    def get_apply_fn_metadata(self) -> FuncMetadata:
+        return self.get_apply_fn_metadata_from_cls()
+
+    @classmethod
+    def get_apply_fn_metadata_from_cls(cls) -> FuncMetadata:
+        """Get the metadata for the apply_async method from the class."""
+        if "apply_async" in cls.__dict__:
+            apply_fn = cls.__dict__["apply_async"]
+        else:
+            apply_fn = getattr(cls, "apply_async", None)
+            if apply_fn is None:
+                raise AttributeError(f"apply_async method not defined in {cls}")
+
+        return func_metadata(apply_fn, skip_names=["self", "cls", "progress_callback"])
+
+    def _log_tool_application(self, frame: Any) -> None:
+        params = {}
+        ignored_params = {"self", "log_call", "catch_exceptions", "args", "apply_fn", "progress_callback"}
+        for param, value in frame.f_locals.items():
+            if param in ignored_params:
+                continue
+            if param == "kwargs":
+                params.update(value)
+            else:
+                params[param] = value
+        log.info(f"{self.get_name_from_cls()}: {dict_string(params)}")
+
+    @staticmethod
+    def _limit_length(result: str, max_answer_chars: int) -> str:
+        if (n_chars := len(result)) > max_answer_chars:
+            result = (
+                f"The answer is too long ({n_chars} characters). "
+                + "Please try a more specific tool query or raise the max_answer_chars parameter."
+            )
+        return result
+
+    def is_active(self) -> bool:
+        return self.agent.tool_is_active(self.__class__)
+
+    async def _default_progress_callback(self, message: str) -> None:
+        """Default progress callback that logs to the standard logger."""
+        log.info(f"Progress: {message}")
+
+    def apply_ex(self, log_call: bool = True, catch_exceptions: bool = True, **kwargs) -> str:
+        """
+        Synchronous wrapper for async tools - runs the async apply_async method.
+        """
+        async def task() -> str:
+            # Add default progress callback if none provided
+            if "progress_callback" not in kwargs:
+                kwargs["progress_callback"] = self._default_progress_callback
+
+            apply_fn = await self.get_apply_fn()
+
+            try:
+                if not self.is_active():
+                    return f"Error: Tool '{self.get_name_from_cls()}' is not active. Active tools: {self.agent.get_active_tool_names()}"
+            except Exception as e:
+                return f"RuntimeError while checking if tool {self.get_name_from_cls()} is active: {e}"
+
+            if log_call:
+                self._log_tool_application(inspect.currentframe())
+            try:
+                # check whether the tool requires an active project and language server
+                if not isinstance(self, ToolMarkerDoesNotRequireActiveProject):
+                    if self.agent._active_project is None:
+                        return (
+                            "Error: No active project. Ask to user to select a project from this list: "
+                            + f"{self.agent.serena_config.project_names}"
+                        )
+                    if not self.agent.is_language_server_running():
+                        log.info("Language server is not running. Starting it ...")
+                        self.agent.reset_language_server()
+
+                # apply the actual async tool
+                result = await apply_fn(**kwargs)
+
+            except Exception as e:
+                if not catch_exceptions:
+                    raise
+                msg = f"Error executing async tool: {e}\\n{traceback.format_exc()}"
+                log.error(
+                    f"Error executing async tool: {e}. "
+                    f"Consider restarting the language server to solve this (especially, if it's a timeout of a symbolic operation)",
+                    exc_info=e,
+                )
+                result = msg
+
+            if log_call:
+                log.info(f"Result: {result}")
+
+            try:
+                self.language_server.save_cache()
+            except Exception as e:
+                log.error(f"Error saving language server cache: {e}")
+
+            return result
+
+        # Run the async task in the current event loop
+        future = self.agent.issue_task(lambda: asyncio.run(task()), name=self.__class__.__name__)
+        return future.result(timeout=self.agent.serena_config.tool_timeout)
+
 
 class RestartLanguageServerTool(Tool):
     """Restarts the language server, may be necessary when edits not through Serena happen."""
@@ -1470,6 +1635,56 @@ class ReadFileTool(Tool):
 
         return self._limit_length(result, max_answer_chars)
 
+class AsyncReadFileTool(AsyncTool):
+    """
+    Asynchronously reads a file within the project directory with progress reporting.
+    """
+
+    async def apply_async(
+        self, 
+        relative_path: str, 
+        start_line: int = 0, 
+        end_line: int | None = None, 
+        max_answer_chars: int = _DEFAULT_MAX_ANSWER_LENGTH,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously reads the given file or a chunk of it. Generally, symbolic operations
+        like find_symbol or find_referencing_symbols should be preferred if you know which symbols you are looking for.
+        Reading the entire file is only recommended if there is no other way to get the content required for the task.
+
+        :param relative_path: the relative path to the file to read
+        :param start_line: the 0-based index of the first line to be retrieved.
+        :param end_line: the 0-based index of the last line to be retrieved (inclusive). If None, read until the end of the file.
+        :param max_answer_chars: if the file (chunk) is longer than this number of characters,
+            no content will be returned. Don't adjust unless there is really no other way to get the content
+            required for the task.
+        :param progress_callback: optional callback for progress updates
+        :return: the full text of the file at the given relative path
+        """
+        self.agent.validate_relative_path(relative_path)
+
+        if progress_callback:
+            await progress_callback(f"Reading file: {relative_path}...")
+
+        # Use async file I/O for better responsiveness
+        full_path = Path(self.get_project_root()) / relative_path
+        async with aiofiles.open(full_path, mode='r', encoding='utf-8') as f:
+            content = await f.read()
+
+        result_lines = content.splitlines()
+        if end_line is None:
+            result_lines = result_lines[start_line:]
+        else:
+            self.lines_read.add_lines_read(relative_path, (start_line, end_line))
+            result_lines = result_lines[start_line : end_line + 1]
+        result = "\\n".join(result_lines)
+
+        if progress_callback:
+            await progress_callback(f"Finished reading file: {relative_path}.")
+
+        return self._limit_length(result, max_answer_chars)
+
 
 class CreateTextFileTool(Tool, ToolMarkerCanEdit):
     """
@@ -1502,6 +1717,288 @@ class CreateTextFileTool(Tool, ToolMarkerCanEdit):
         if will_overwrite_existing:
             answer += " Overwrote existing file."
         return answer
+
+class AsyncCreateTextFileTool(AsyncTool, ToolMarkerCanEdit):
+    """
+    Asynchronously creates or overwrites a text file with progress reporting.
+    """
+
+    async def apply_async(
+        self, 
+        relative_path: str, 
+        content: str,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously write a new file (or overwrite an existing file). For existing files, it is strongly recommended
+        to use symbolic operations like replace_symbol_body or insert_after_symbol/insert_before_symbol, if possible.
+        You can also use insert_at_line to insert content at a specific line for existing files if the symbolic operations
+        are not the right choice for what you want to do.
+
+        If ever used on an existing file, the content has to be the complete content of that file (so it
+        may never end with something like "The remaining content of the file is left unchanged.").
+        For operations that just replace a part of a file, use the replace_lines or the symbolic editing tools instead.
+
+        :param relative_path: the relative path to the file to create
+        :param content: the (utf-8-encoded) content to write to the file
+        :param progress_callback: optional callback for progress updates
+        :return: a message indicating success or failure
+        """
+        self.agent.validate_relative_path(relative_path)
+
+        if progress_callback:
+            await progress_callback(f"Writing to file: {relative_path}...")
+
+        abs_path = (Path(self.get_project_root()) / relative_path).resolve()
+        will_overwrite_existing = abs_path.exists()
+
+        # Ensure parent directories exist
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Use async file I/O for better responsiveness
+        async with aiofiles.open(abs_path, mode='w', encoding='utf-8') as f:
+            await f.write(content)
+
+        answer = f"File created: {relative_path}."
+        if will_overwrite_existing:
+            answer += " Overwrote existing file."
+            
+        if progress_callback:
+            await progress_callback(f"Finished writing to file: {relative_path}.")
+
+        return answer
+
+class AsyncExecuteShellCommandTool(AsyncTool, ToolMarkerCanEdit):
+    """
+    Asynchronously executes a shell command with progress reporting.
+    """
+
+    async def apply_async(
+        self,
+        command: str,
+        cwd: str | None = None,
+        capture_stderr: bool = True,
+        max_answer_chars: int = _DEFAULT_MAX_ANSWER_LENGTH,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously execute a shell command and return its output.
+
+        IMPORTANT: you should always consider the memory about suggested shell commands before using this tool.
+        If this memory was not loaded in the current conversation, you should load it using the `read_memory` tool
+        before using this tool.
+
+        You should have at least once looked at the suggested shell commands from the corresponding memory
+        created during the onboarding process before using this tool.
+        Never execute unsafe shell commands like `rm -rf /` or similar! Generally be very careful with deletions.
+
+        :param command: the shell command to execute
+        :param cwd: the working directory to execute the command in. If None, the project root will be used.
+        :param capture_stderr: whether to capture and return stderr output
+        :param max_answer_chars: if the output is longer than this number of characters,
+            no content will be returned. Don't adjust unless there is really no other way to get the content
+            required for the task.
+        :param progress_callback: optional callback for progress updates
+        :return: a JSON object containing the command's stdout and optionally stderr output
+        """
+        _cwd = cwd or self.get_project_root()
+        
+        if progress_callback:
+            await progress_callback(f"Executing command: {command}")
+
+        # Use asyncio subprocess for non-blocking execution
+        is_windows = platform.system() == "Windows"
+        
+        if is_windows:
+            # On Windows, use the shell directly
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE if capture_stderr else None,
+                cwd=_cwd,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            # On Unix-like systems, use shell=True equivalent
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE if capture_stderr else None,
+                cwd=_cwd
+            )
+
+        # Wait for the process to complete
+        stdout_bytes, stderr_bytes = await process.communicate()
+        
+        # Decode output with error handling
+        stdout = stdout_bytes.decode('utf-8', errors='replace') if stdout_bytes else ""
+        stderr = stderr_bytes.decode('utf-8', errors='replace') if stderr_bytes and capture_stderr else None
+        
+        if progress_callback:
+            await progress_callback(f"Command completed with return code: {process.returncode}")
+
+        # Create result in the same format as the synchronous version
+        from serena.util.shell import ShellCommandResult
+        result = ShellCommandResult(
+            stdout=stdout,
+            stderr=stderr,
+            return_code=process.returncode,
+            cwd=_cwd
+        )
+        
+        result_json = result.json()
+        return self._limit_length(result_json, max_answer_chars)
+
+
+class AsyncGetSymbolsOverviewTool(AsyncTool):
+    """
+    Asynchronously gets an overview of the top-level symbols defined in a given file or directory.
+    """
+
+    async def apply_async(
+        self, 
+        relative_path: str, 
+        max_answer_chars: int = _DEFAULT_MAX_ANSWER_LENGTH,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously gets an overview of the given file or directory.
+        For each analyzed file, we list the top-level symbols in the file (name_path, kind).
+        Use this tool to get a high-level understanding of the code symbols.
+        Calling this is often a good idea before more targeted reading, searching or editing operations on the code symbols.
+
+        :param relative_path: the relative path to the file or directory to get the overview of
+        :param max_answer_chars: if the overview is longer than this number of characters,
+            no content will be returned. Don't adjust unless there is really no other way to get the content
+            required for the task. If the overview is too long, you should use a smaller directory instead,
+            (e.g. a subdirectory).
+        :param progress_callback: optional callback for progress updates
+        :return: a JSON object mapping relative paths of all contained files to info about top-level symbols in the file (name_path, kind).
+        """
+        if progress_callback:
+            await progress_callback(f"Getting symbols overview for: {relative_path}")
+
+        # Use asyncio to run the potentially blocking language server call in a thread pool
+        path_to_symbol_infos = await asyncio.get_event_loop().run_in_executor(
+            None, 
+            self.language_server.request_overview, 
+            relative_path
+        )
+        
+        result = {}
+        for file_path, symbols in path_to_symbol_infos.items():
+            # TODO: maybe include not just top-level symbols? We could filter by kind to exclude variables
+            #  The language server methods would need to be adjusted for this.
+            result[file_path] = [{"name_path": symbol[0], "kind": int(symbol[1])} for symbol in symbols]
+
+        if progress_callback:
+            await progress_callback(f"Found {len(result)} files with symbols")
+
+        result_json_str = json.dumps(result)
+        return self._limit_length(result_json_str, max_answer_chars)
+
+
+class AsyncListDirTool(AsyncTool):
+    """
+    Asynchronously lists files and directories in the given directory (optionally with recursion).
+    """
+
+    async def apply_async(
+        self, 
+        relative_path: str, 
+        recursive: bool, 
+        max_answer_chars: int = _DEFAULT_MAX_ANSWER_LENGTH,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously lists all non-gitignored files and directories in the given directory (optionally with recursion).
+
+        :param relative_path: the relative path to the directory to list; pass "." to scan the project root
+        :param recursive: whether to scan subdirectories recursively
+        :param max_answer_chars: if the output is longer than this number of characters,
+            no content will be returned. Don't adjust unless there is really no other way to get the content
+            required for the task.
+        :param progress_callback: optional callback for progress updates
+        :return: a JSON object with the names of directories and files within the given directory
+        """
+        self.agent.validate_relative_path(relative_path)
+
+        if progress_callback:
+            await progress_callback(f"Scanning directory: {relative_path}")
+
+        # Use asyncio to run the potentially blocking directory scan in a thread pool
+        def scan_directory_task():
+            from serena.util.file_system import scan_directory
+            return scan_directory(
+                os.path.join(self.get_project_root(), relative_path),
+                relative_to=self.get_project_root(),
+                recursive=recursive,
+                is_ignored_dir=self.agent.path_is_gitignored,
+                is_ignored_file=self.agent.path_is_gitignored,
+            )
+
+        dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
+
+        if progress_callback:
+            await progress_callback(f"Found {len(dirs)} directories and {len(files)} files")
+
+        result = json.dumps({"dirs": dirs, "files": files})
+        return self._limit_length(result, max_answer_chars)
+
+
+class AsyncFindFileTool(AsyncTool):
+    """
+    Asynchronously finds files in the given relative paths
+    """
+
+    async def apply_async(
+        self, 
+        file_mask: str, 
+        relative_path: str,
+        progress_callback: ProgressCallback = None
+    ) -> str:
+        """
+        Asynchronously finds non-gitignored files matching the given file mask within the given relative path
+
+        :param file_mask: the filename or file mask (using the wildcards * or ?) to search for
+        :param relative_path: the relative path to the directory to search in; pass "." to scan the project root
+        :param progress_callback: optional callback for progress updates
+        :return: a JSON object with the list of matching files
+        """
+        self.agent.validate_relative_path(relative_path)
+
+        if progress_callback:
+            await progress_callback(f"Searching for files matching '{file_mask}' in {relative_path}")
+
+        dir_to_scan = os.path.join(self.get_project_root(), relative_path)
+
+        # find the files by ignoring everything that doesn't match
+        def is_ignored_file(abs_path: str) -> bool:
+            if self.agent.path_is_gitignored(abs_path):
+                return True
+            filename = os.path.basename(abs_path)
+            from fnmatch import fnmatch
+            return not fnmatch(filename, file_mask)
+
+        # Use asyncio to run the potentially blocking directory scan in a thread pool
+        def scan_directory_task():
+            from serena.util.file_system import scan_directory
+            return scan_directory(
+                path=dir_to_scan,
+                recursive=True,
+                is_ignored_dir=self.agent.path_is_gitignored,
+                is_ignored_file=is_ignored_file,
+            )
+
+        dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
+
+        if progress_callback:
+            await progress_callback(f"Found {len(files)} matching files")
+
+        result = json.dumps({"files": files})
+        return result
 
 
 class ListDirTool(Tool):
@@ -2381,24 +2878,31 @@ class InitialInstructionsTool(Tool):
 
 def _iter_tool_classes(same_module_only: bool = True) -> Generator[type[Tool], None, None]:
     """
-    Iterate over Tool subclasses.
+    Iterate over Tool and AsyncTool subclasses.
 
     :param same_module_only: Whether to only iterate over tools defined in the same module as the Tool class
         or over all subclasses of Tool.
     """
+    # Iterate over regular Tool subclasses
     for tool_class in iter_subclasses(Tool):
         if same_module_only and tool_class.__module__ != Tool.__module__:
             continue
         yield tool_class
+    
+    # Iterate over AsyncTool subclasses
+    for tool_class in iter_subclasses(AsyncTool):
+        if same_module_only and tool_class.__module__ != AsyncTool.__module__:
+            continue
+        yield tool_class
 
 
-_TOOL_REGISTRY_DICT: dict[str, type[Tool]] = {tool_class.get_name_from_cls(): tool_class for tool_class in _iter_tool_classes()}
+_TOOL_REGISTRY_DICT: dict[str, type[Tool] | type[AsyncTool]] = {tool_class.get_name_from_cls(): tool_class for tool_class in _iter_tool_classes()}
 """maps tool name to the corresponding tool class"""
 
 
 class ToolRegistry:
     @staticmethod
-    def get_tool_class_by_name(tool_name: str) -> type[Tool]:
+    def get_tool_class_by_name(tool_name: str) -> type[Tool] | type[AsyncTool]:
         try:
             return _TOOL_REGISTRY_DICT[tool_name]
         except KeyError as e:
@@ -2406,7 +2910,7 @@ class ToolRegistry:
             raise ValueError(f"Tool with name {tool_name} not found. Available tools:\n{available_tools}") from e
 
     @staticmethod
-    def get_all_tool_classes() -> list[type[Tool]]:
+    def get_all_tool_classes() -> list[type[Tool] | type[AsyncTool]]:
         return list(_TOOL_REGISTRY_DICT.values())
 
     @staticmethod

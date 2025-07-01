@@ -32,6 +32,7 @@ dependencies = [
   "docstring_parser>=0.16",
   "joblib>=1.5.1",
   "tqdm>=4.67.1",
+  "aiofiles>=24.1.0",
 ]
 
 [project.scripts]
