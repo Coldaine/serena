@@ -888,7 +888,7 @@ class SerenaAgent:
         if self.path_is_gitignored(relative_path):
             raise ValueError(f"File {relative_path} is gitignored, can't read or edit it for safety reasons")
 
-    def get_exposed_tool_instances(self) -> list["Tool" | "AsyncTool"]:
+    def get_exposed_tool_instances(self) -> list[Union["Tool", "AsyncTool"]]:
         """
         :return: all tool instances, including the non-active ones. For MCP clients, we need to expose them all since typical
             clients don't react to changes in the set of tools.
