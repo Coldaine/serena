@@ -33,7 +33,9 @@ tool_timeout: 180
 # instruct Serena to activate the project by its path for first-time activation.
 # NOTE: Make sure there are no name collisions in the names of registered projects.
 projects:
+- C:\Users\pmacl\AppData\Local\Temp\tmpjci1o9_q
 - E:\Serena MCP
 - E:\Tools and Apps\multi-mcp
 - E:\_ProjectBroadside\Morpheus
+- E:\_ProjectBroadside\ProjectBroadside
 - E:\_ProjectBroadside\ProjectBroadside.Scripts

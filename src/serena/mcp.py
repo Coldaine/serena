@@ -209,6 +209,9 @@ class SerenaMCPFactorySingleProcess(SerenaMCPFactory):
         """
         super().__init__(context=context, project=project)
         self.agent: SerenaAgent | None = None
+        # Heartbeat functionality
+        self._heartbeat_thread: threading.Thread | None = None
+        self._stop_heartbeat = threading.Event()
 
     def _instantiate_agent(self, serena_config: SerenaConfig, modes: list[SerenaAgentMode]) -> None:
         self.agent = SerenaAgent(project=self.project, serena_config=serena_config, context=self.context, modes=modes)
@@ -217,11 +220,32 @@ class SerenaMCPFactorySingleProcess(SerenaMCPFactory):
         assert self.agent is not None
         yield from self.agent.get_exposed_tool_instances()
 
+    def _heartbeat(self) -> None:
+        """Log a heartbeat message every 60 seconds"""
+        while not self._stop_heartbeat.is_set():
+            log.info("Serena MCP server is alive...")
+            self._stop_heartbeat.wait(60)
+
+    def start_heartbeat_thread(self) -> None:
+        """Start the heartbeat logging thread"""
+        if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
+            log.info("Starting heartbeat thread")
+            self._stop_heartbeat.clear()
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
+            self._heartbeat_thread.start()
+
     @asynccontextmanager
     async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
         self._set_mcp_tools(mcp_server)
+        log.info(f"MCP server listening on {mcp_server.settings.host}:{mcp_server.settings.port}")
         log.info("MCP server lifetime setup complete")
-        yield
+        self.start_heartbeat_thread()
+        try:
+            yield
+        finally:
+            self._stop_heartbeat.set()
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.join()
 
 
 class SerenaMCPFactoryWithProcessIsolation(SerenaMCPFactory):
