@@ -1678,7 +1678,7 @@ class AsyncReadFileTool(AsyncTool):
         else:
             self.lines_read.add_lines_read(relative_path, (start_line, end_line))
             result_lines = result_lines[start_line : end_line + 1]
-        result = "\\n".join(result_lines)
+        result = "\n".join(result_lines)
 
         if progress_callback:
             await progress_callback(f"Finished reading file: {relative_path}.")
