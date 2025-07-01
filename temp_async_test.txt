@@ -1,0 +1,10 @@
+This is a test file created using Serena's async tools!
+
+Created at: July 1, 2025
+Tool: AsyncCreateTextFileTool
+Purpose: Testing async functionality
+
+Some random content:
+- Line 1 of test data
+- Line 2 of test data  
+- Line 3 of test data

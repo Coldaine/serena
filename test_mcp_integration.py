@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-MCP Client test script to verify async tools functionality
+End-to-end MCP integration test to verify async tools functionality.
 """
 import asyncio
 import json
 import tempfile
 from pathlib import Path
+import os
 
 # Add src to path to import our modules
 import sys
 sys.path.insert(0, 'src')
 
 try:
-    from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 except ImportError:
     print("❌ MCP client libraries not available for direct testing")
@@ -20,122 +20,115 @@ except ImportError:
     sys.exit(0)
 
 
-async def test_mcp_async_tools():
-    """Test async tools through MCP protocol"""
-    print("🧪 Testing Async Tools via MCP Protocol")
+async def run_e2e_test():
+    """Runs an end-to-end test of async tools via the MCP protocol."""
+    print("🧪 E2E Testing Async Tools via MCP Protocol")
     print("=" * 50)
-    
-    try:
-        # This would connect to our running MCP server
-        # For now, let's simulate what would happen
-        
-        print("📋 Simulating MCP client connection...")
-        print("   - Server should be listening and ready")
-        print("   - Async tools should be registered")
-        print("   - Progress callbacks should be functional")
-        
-        # Create a temporary test file for operations
-        with tempfile.TemporaryDirectory() as temp_dir:
-            test_file = Path(temp_dir) / "mcp_test.txt"
-            test_content = "MCP async tool test content\nLine 2\nLine 3"
-            
-            print(f"\n📁 Test file: {test_file}")
-            print(f"📝 Test content: {len(test_content)} characters")
-            
-            # Simulate async tool calls that would happen via MCP
-            print("\n🔧 Tools that should be available via MCP:")
-            print("   ✅ AsyncReadFileTool - async file reading")
-            print("   ✅ AsyncCreateTextFileTool - async file writing")  
-            print("   ✅ AsyncExecuteShellCommandTool - async shell execution")
-            print("   ✅ AsyncGetSymbolsOverviewTool - async symbol analysis")
-            print("   ✅ AsyncListDirTool - async directory listing")
-            print("   ✅ AsyncFindFileTool - async file finding")
-            
-            print("\n📡 Progress callback features:")
-            print("   ✅ Real-time status updates")
-            print("   ✅ Non-blocking operation progress")
-            print("   ✅ Meaningful progress messages")
-            
-            return True
-            
-    except Exception as e:
-        print(f"❌ MCP Test Error: {e}")
-        return False
 
+    with tempfile.TemporaryDirectory() as temp_dir:
+        project_root = Path(temp_dir)
+        print(f"📁 Created temporary project at: {project_root}")
 
-async def validate_server_running():
-    """Validate that our MCP server is running and responsive"""
-    print("\n🔍 Validating MCP Server Status")
-    print("-" * 30)
-    
-    # Check if we can import our async tools (basic validation)
-    try:
-        from serena.agent import (
-            AsyncReadFileTool, 
-            AsyncCreateTextFileTool, 
-            AsyncExecuteShellCommandTool,
-            AsyncGetSymbolsOverviewTool,
-            AsyncListDirTool,
-            AsyncFindFileTool
+        # 1. Start the MCP server as a subprocess
+        print("🚀 Starting MCP server...")
+        server_process = await asyncio.create_subprocess_exec(
+            "uv", "run", "serena-mcp-server",
+            "--project", str(project_root),
+            "--enable-web-dashboard", "False",
+            "--enable-gui-log-window", "False",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        print("✅ All async tools importable")
-        
-        # Verify each tool has the expected async methods
-        async_tools = [
-            AsyncReadFileTool,
-            AsyncCreateTextFileTool, 
-            AsyncExecuteShellCommandTool,
-            AsyncGetSymbolsOverviewTool,
-            AsyncListDirTool,
-            AsyncFindFileTool
-        ]
-        
-        for tool_class in async_tools:
-            if hasattr(tool_class, 'apply_async'):
-                print(f"✅ {tool_class.__name__} has apply_async method")
-            else:
-                print(f"❌ {tool_class.__name__} missing apply_async method")
-                return False
-                
-        return True
-        
-    except ImportError as e:
-        print(f"❌ Import error: {e}")
-        return False
 
+        # 2. Connect to the server using the stdio client
+        async with stdio_client(server_process) as session:
+            print("✅ Connected to MCP server via stdio.")
 
-async def main():
-    """Run MCP integration tests"""
-    print("🚀 MCP Server Integration Test")
-    print("=" * 50)
-    
-    # Validate server and tools
-    server_ok = await validate_server_running()
-    if not server_ok:
-        print("❌ Server validation failed")
-        return False
-    
-    # Test async tools via MCP
-    mcp_ok = await test_mcp_async_tools()
-    if not mcp_ok:
-        print("❌ MCP async tools test failed")
-        return False
-    
-    print("\n" + "=" * 50)
-    print("🎉 MCP INTEGRATION TEST COMPLETED!")
-    print("✅ Server is running")
-    print("✅ Async tools are registered")
-    print("✅ Progress callback system ready")
-    print("✅ Integration appears successful")
-    
-    print("\n📋 Manual Testing Recommended:")
-    print("   1. Connect MCP client to test actual tool execution")
-    print("   2. Verify progress callbacks in real usage")
-    print("   3. Test async performance under load")
-    
+            # 3. Test `async_create_text_file`
+            print("\n🔧 Testing 'async_create_text_file'...")
+            file_to_create = "test_file.txt"
+            content_to_write = "Hello from the E2E test!"
+            result = await session.call_tool(
+                "async_create_text_file",
+                relative_path=file_to_create,
+                content=content_to_write
+            )
+            print(f"   Tool result: {result}")
+            assert "File created" in result
+
+            # Verify the file was actually created with the correct content
+            created_file_path = project_root / file_to_create
+            assert created_file_path.exists()
+            assert created_file_path.read_text() == content_to_write
+            print("   ✅ File created and content verified.")
+
+            # 4. Test `async_read_file`
+            print("\n🔧 Testing 'async_read_file'...")
+            read_result = await session.call_tool(
+                "async_read_file",
+                relative_path=file_to_create
+            )
+            print(f"   Tool result: {read_result}")
+            assert read_result == content_to_write
+            print("   ✅ File content read back successfully.")
+
+            # Test `async_read_file` on a non-existent file
+            print("\n🔧 Testing 'async_read_file' on a non-existent file...")
+            non_existent_file = "no_such_file.txt"
+            read_error_result = await session.call_tool(
+                "async_read_file",
+                relative_path=non_existent_file
+            )
+            print(f"   Tool result: {read_error_result}")
+            # The tool should return a descriptive error message
+            assert "Error" in read_error_result
+            assert "FileNotFoundError" in read_error_result
+            print("   ✅ Correctly handled non-existent file.")
+
+            # 5. Test `async_execute_shell_command`
+            print("\n🔧 Testing 'async_execute_shell_command'...")
+            command_to_run = "echo 'Shell command successful!'"
+            shell_result_str = await session.call_tool(
+                "async_execute_shell_command",
+                command=command_to_run
+            )
+            shell_result = json.loads(shell_result_str)
+            print(f"   Tool result: {shell_result}")
+            assert shell_result["return_code"] == 0
+            assert "Shell command successful!" in shell_result["stdout"]
+            print("   ✅ Shell command executed successfully.")
+
+            # Test `async_execute_shell_command` with a failing command
+            print("\n🔧 Testing 'async_execute_shell_command' with a failing command...")
+            # A more reliable cross-platform way to generate an error is to call a non-existent command.
+            failing_command = "this_command_does_not_exist_12345"
+            failing_shell_result_str = await session.call_tool(
+                "async_execute_shell_command", command=failing_command
+            )
+            failing_shell_result = json.loads(failing_shell_result_str)
+            print(f"   Tool result: {failing_shell_result}")
+            assert failing_shell_result["return_code"] != 0
+            print("   ✅ Correctly handled failing shell command.")
+
+        # 6. Cleanup
+        print("\n🧹 Shutting down server...")
+        if server_process.returncode is None:
+            server_process.terminate()
+            await server_process.wait()
+        print("   ✅ Server shut down.")
+
     return True
 
 
 if __name__ == "__main__":
-    success = asyncio.run(main())
-    exit(0 if success else 1)
+    try:
+        success = asyncio.run(run_e2e_test())
+        if success:
+            print("\n🎉 ALL E2E TESTS PASSED!")
+            exit(0)
+        else:
+            print("\n❌ E2E TESTS FAILED.")
+            exit(1)
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+        exit(1)
