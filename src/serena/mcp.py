@@ -242,6 +242,8 @@ class SerenaMCPFactoryWithProcessIsolation(SerenaMCPFactory):
         self.active_tool_names: set[str] | None = None
         self.serena_agent_process: ProcessIsolatedSerenaAgent | None = None
         self.serena_dashboard_process: ProcessIsolatedDashboard | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+        self._stop_heartbeat = threading.Event()
 
     @staticmethod
     def _determine_active_tool_names(context: SerenaAgentContext, project: Project | None) -> set[str]:
@@ -428,7 +430,9 @@ class SerenaMCPFactoryWithProcessIsolation(SerenaMCPFactory):
         # Start monitoring task
         monitor_task = asyncio.create_task(monitor_global_shutdown())
 
+        log.info(f"MCP server listening on {mcp_server.settings.host}:{mcp_server.settings.port}")
         log.info("MCP server lifetime setup complete")
+        self.start_heartbeat_thread()
         try:
             yield
         except (KeyboardInterrupt, SystemExit):
@@ -447,10 +451,27 @@ class SerenaMCPFactoryWithProcessIsolation(SerenaMCPFactory):
             self.serena_agent_process.stop()
             if self.serena_dashboard_process is not None:
                 self.serena_dashboard_process.stop()
+            self._stop_heartbeat.set()
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.join()
             request_global_shutdown()
             log.info("Shutting down all processes")
             signal.signal(signal.SIGINT, sigint_singal)
             signal.signal(signal.SIGTERM, sigterm_signal)
+
+    def _heartbeat(self) -> None:
+        """Log a heartbeat message every 60 seconds"""
+        while not self._stop_heartbeat.is_set():
+            log.info("Serena MCP server is alive...")
+            self._stop_heartbeat.wait(60)
+
+    def start_heartbeat_thread(self) -> None:
+        """Start the heartbeat logging thread"""
+        if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
+            log.info("Starting heartbeat thread")
+            self._stop_heartbeat.clear()
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat, daemon=True)
+            self._heartbeat_thread.start()
 
 
 class ProjectType(click.ParamType):

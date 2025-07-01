@@ -34,4 +34,6 @@ tool_timeout: 180
 # NOTE: Make sure there are no name collisions in the names of registered projects.
 projects:
 - E:\Serena MCP
+- E:\Tools and Apps\multi-mcp
+- E:\_ProjectBroadside\Morpheus
 - E:\_ProjectBroadside\ProjectBroadside.Scripts
