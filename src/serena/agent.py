@@ -1662,28 +1662,59 @@ class AsyncReadFileTool(AsyncTool):
         :param progress_callback: optional callback for progress updates
         :return: the full text of the file at the given relative path
         """
-        self.agent.validate_relative_path(relative_path)
+        try:
+            self.agent.validate_relative_path(relative_path)
 
-        if progress_callback:
-            await progress_callback(f"Reading file: {relative_path}...")
+            if progress_callback:
+                await progress_callback(f"Reading file: {relative_path}...")
 
-        # Use async file I/O for better responsiveness
-        full_path = Path(self.get_project_root()) / relative_path
-        async with aiofiles.open(full_path, mode='r', encoding='utf-8') as f:
-            content = await f.read()
+            # Use async file I/O for better responsiveness
+            full_path = Path(self.get_project_root()) / relative_path
+            
+            try:
+                async with aiofiles.open(full_path, mode='r', encoding='utf-8') as f:
+                    content = await f.read()
 
-        result_lines = content.splitlines()
-        if end_line is None:
-            result_lines = result_lines[start_line:]
-        else:
-            self.lines_read.add_lines_read(relative_path, (start_line, end_line))
-            result_lines = result_lines[start_line : end_line + 1]
-        result = "\n".join(result_lines)
+                result_lines = content.splitlines()
+                if end_line is None:
+                    result_lines = result_lines[start_line:]
+                else:
+                    self.lines_read.add_lines_read(relative_path, (start_line, end_line))
+                    result_lines = result_lines[start_line : end_line + 1]
+                result = "\n".join(result_lines)
 
-        if progress_callback:
-            await progress_callback(f"Finished reading file: {relative_path}.")
+                if progress_callback:
+                    await progress_callback(f"Finished reading file: {relative_path}.")
 
-        return self._limit_length(result, max_answer_chars)
+                return self._limit_length(result, max_answer_chars)
+
+            except FileNotFoundError:
+                error_msg = f"File not found: {full_path}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return f"Error: {error_msg}"
+            except PermissionError:
+                error_msg = f"Permission denied reading file: {full_path}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return f"Error: {error_msg}"
+            except UnicodeDecodeError as e:
+                error_msg = f"Error decoding file {full_path}: {str(e)}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return f"Error: {error_msg}"
+            except Exception as e:
+                error_msg = f"Unexpected error reading file {full_path}: {str(e)}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return f"Error: {error_msg}"
+
+        except Exception as e:
+            # Top-level error handler for any unexpected issues
+            error_msg = f"Error executing async_read_file: {str(e)}"
+            if progress_callback:
+                await progress_callback(f"Error: {error_msg}")
+            return f"Error: {error_msg}"
 
 
 class CreateTextFileTool(Tool, ToolMarkerCanEdit):
@@ -1877,27 +1908,55 @@ class AsyncGetSymbolsOverviewTool(AsyncTool):
         :param progress_callback: optional callback for progress updates
         :return: a JSON object mapping relative paths of all contained files to info about top-level symbols in the file (name_path, kind).
         """
-        if progress_callback:
-            await progress_callback(f"Getting symbols overview for: {relative_path}")
+        try:
+            if progress_callback:
+                await progress_callback(f"Getting symbols overview for: {relative_path}")
 
-        # Use asyncio to run the potentially blocking language server call in a thread pool
-        path_to_symbol_infos = await asyncio.get_event_loop().run_in_executor(
-            None, 
-            self.language_server.request_overview, 
-            relative_path
-        )
-        
-        result = {}
-        for file_path, symbols in path_to_symbol_infos.items():
-            # TODO: maybe include not just top-level symbols? We could filter by kind to exclude variables
-            #  The language server methods would need to be adjusted for this.
-            result[file_path] = [{"name_path": symbol[0], "kind": int(symbol[1])} for symbol in symbols]
+            # Check if the path exists before attempting to get symbols
+            full_path = Path(self.get_project_root()) / relative_path
+            if not full_path.exists():
+                error_msg = f"Path not found: {full_path}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg})
 
-        if progress_callback:
-            await progress_callback(f"Found {len(result)} files with symbols")
+            # Use asyncio to run the potentially blocking language server call in a thread pool
+            def get_overview_task():
+                try:
+                    return self.language_server.request_overview(relative_path)
+                except Exception as e:
+                    raise Exception(f"Language server error getting overview for {relative_path}: {str(e)}") from e
 
-        result_json_str = json.dumps(result)
-        return self._limit_length(result_json_str, max_answer_chars)
+            try:
+                path_to_symbol_infos = await asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    get_overview_task
+                )
+                
+                result = {}
+                for file_path, symbols in path_to_symbol_infos.items():
+                    # TODO: maybe include not just top-level symbols? We could filter by kind to exclude variables
+                    #  The language server methods would need to be adjusted for this.
+                    result[file_path] = [{"name_path": symbol[0], "kind": int(symbol[1])} for symbol in symbols]
+
+                if progress_callback:
+                    await progress_callback(f"Found {len(result)} files with symbols")
+
+                result_json_str = json.dumps(result)
+                return self._limit_length(result_json_str, max_answer_chars)
+
+            except Exception as e:
+                error_msg = f"Error getting symbols overview: {str(e)}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg})
+
+        except Exception as e:
+            # Top-level error handler for any unexpected issues
+            error_msg = f"Error executing async_get_symbols_overview: {str(e)}"
+            if progress_callback:
+                await progress_callback(f"Error: {error_msg}")
+            return json.dumps({"error": error_msg})
 
 
 class AsyncListDirTool(AsyncTool):
@@ -1923,30 +1982,76 @@ class AsyncListDirTool(AsyncTool):
         :param progress_callback: optional callback for progress updates
         :return: a JSON object with the names of directories and files within the given directory
         """
-        self.agent.validate_relative_path(relative_path)
+        try:
+            self.agent.validate_relative_path(relative_path)
 
-        if progress_callback:
-            await progress_callback(f"Scanning directory: {relative_path}")
+            if progress_callback:
+                await progress_callback(f"Scanning directory: {relative_path}")
 
-        # Use asyncio to run the potentially blocking directory scan in a thread pool
-        def scan_directory_task():
-            from serena.util.file_system import scan_directory
-            return scan_directory(
-                os.path.join(self.get_project_root(), relative_path),
-                relative_to=self.get_project_root(),
-                recursive=recursive,
-                is_ignored_dir=self.agent.path_is_gitignored,
-                is_ignored_file=self.agent.path_is_gitignored,
-            )
+            dir_to_scan = os.path.join(self.get_project_root(), relative_path)
 
-        dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
+            # Check if directory exists before attempting to scan
+            if not os.path.exists(dir_to_scan):
+                error_msg = f"Directory not found: {dir_to_scan}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "dirs": [], "files": []})
 
-        if progress_callback:
-            await progress_callback(f"Found {len(dirs)} directories and {len(files)} files")
+            if not os.path.isdir(dir_to_scan):
+                error_msg = f"Path is not a directory: {dir_to_scan}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "dirs": [], "files": []})
 
-        result = json.dumps({"dirs": dirs, "files": files})
-        return self._limit_length(result, max_answer_chars)
+            # Use asyncio to run the potentially blocking directory scan in a thread pool
+            def scan_directory_task():
+                try:
+                    from serena.util.file_system import scan_directory
+                    return scan_directory(
+                        dir_to_scan,
+                        relative_to=self.get_project_root(),
+                        recursive=recursive,
+                        is_ignored_dir=self.agent.path_is_gitignored,
+                        is_ignored_file=self.agent.path_is_gitignored,
+                    )
+                except FileNotFoundError as e:
+                    raise FileNotFoundError(f"Directory not found: {dir_to_scan}") from e
+                except PermissionError as e:
+                    raise PermissionError(f"Permission denied accessing directory: {dir_to_scan}") from e
+                except Exception as e:
+                    raise Exception(f"Error scanning directory {dir_to_scan}: {str(e)}") from e
 
+            try:
+                dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
+
+                if progress_callback:
+                    await progress_callback(f"Found {len(dirs)} directories and {len(files)} files")
+
+                result = json.dumps({"dirs": dirs, "files": files})
+                return self._limit_length(result, max_answer_chars)
+
+            except FileNotFoundError as e:
+                error_msg = str(e)
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "dirs": [], "files": []})
+            except PermissionError as e:
+                error_msg = str(e)
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "dirs": [], "files": []})
+            except Exception as e:
+                error_msg = f"Unexpected error during directory scan: {str(e)}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "dirs": [], "files": []})
+
+        except Exception as e:
+            # Top-level error handler for any unexpected issues
+            error_msg = f"Error executing async_list_dir: {str(e)}"
+            if progress_callback:
+                await progress_callback(f"Error: {error_msg}")
+            return json.dumps({"error": error_msg, "dirs": [], "files": []})
 
 class AsyncFindFileTool(AsyncTool):
     """
@@ -1967,40 +2072,83 @@ class AsyncFindFileTool(AsyncTool):
         :param progress_callback: optional callback for progress updates
         :return: a JSON object with the list of matching files
         """
-        self.agent.validate_relative_path(relative_path)
+        try:
+            self.agent.validate_relative_path(relative_path)
 
-        if progress_callback:
-            await progress_callback(f"Searching for files matching '{file_mask}' in {relative_path}")
+            if progress_callback:
+                await progress_callback(f"Searching for files matching '{file_mask}' in {relative_path}")
 
-        dir_to_scan = os.path.join(self.get_project_root(), relative_path)
+            dir_to_scan = os.path.join(self.get_project_root(), relative_path)
 
-        # find the files by ignoring everything that doesn't match
-        def is_ignored_file(abs_path: str) -> bool:
-            if self.agent.path_is_gitignored(abs_path):
-                return True
-            filename = os.path.basename(abs_path)
-            from fnmatch import fnmatch
-            return not fnmatch(filename, file_mask)
+            # Check if directory exists before attempting to scan
+            if not os.path.exists(dir_to_scan):
+                error_msg = f"Directory not found: {dir_to_scan}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "files": []})
 
-        # Use asyncio to run the potentially blocking directory scan in a thread pool
-        def scan_directory_task():
-            from serena.util.file_system import scan_directory
-            return scan_directory(
-                path=dir_to_scan,
-                recursive=True,
-                is_ignored_dir=self.agent.path_is_gitignored,
-                is_ignored_file=is_ignored_file,
-            )
+            if not os.path.isdir(dir_to_scan):
+                error_msg = f"Path is not a directory: {dir_to_scan}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "files": []})
 
-        dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
+            # find the files by ignoring everything that doesn't match
+            def is_ignored_file(abs_path: str) -> bool:
+                if self.agent.path_is_gitignored(abs_path):
+                    return True
+                filename = os.path.basename(abs_path)
+                from fnmatch import fnmatch
+                return not fnmatch(filename, file_mask)
 
-        if progress_callback:
-            await progress_callback(f"Found {len(files)} matching files")
+            # Use asyncio to run the potentially blocking directory scan in a thread pool
+            def scan_directory_task():
+                try:
+                    from serena.util.file_system import scan_directory
+                    return scan_directory(
+                        path=dir_to_scan,
+                        recursive=True,
+                        is_ignored_dir=self.agent.path_is_gitignored,
+                        is_ignored_file=is_ignored_file,
+                    )
+                except FileNotFoundError as e:
+                    raise FileNotFoundError(f"Directory not found: {dir_to_scan}") from e
+                except PermissionError as e:
+                    raise PermissionError(f"Permission denied accessing directory: {dir_to_scan}") from e
+                except Exception as e:
+                    raise Exception(f"Error scanning directory {dir_to_scan}: {str(e)}") from e
 
-        result = json.dumps({"files": files})
-        return result
+            try:
+                dirs, files = await asyncio.get_event_loop().run_in_executor(None, scan_directory_task)
 
+                if progress_callback:
+                    await progress_callback(f"Found {len(files)} matching files")
 
+                result = json.dumps({"files": files})
+                return result
+
+            except FileNotFoundError as e:
+                error_msg = str(e)
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "files": []})
+            except PermissionError as e:
+                error_msg = str(e)
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "files": []})
+            except Exception as e:
+                error_msg = f"Unexpected error during file search: {str(e)}"
+                if progress_callback:
+                    await progress_callback(f"Error: {error_msg}")
+                return json.dumps({"error": error_msg, "files": []})
+
+        except Exception as e:
+            # Top-level error handler for any unexpected issues
+            error_msg = f"Error executing async_find_file: {str(e)}"
+            if progress_callback:
+                await progress_callback(f"Error: {error_msg}")
+            return json.dumps({"error": error_msg, "files": []})
 class ListDirTool(Tool):
     """
     Lists files and directories in the given directory (optionally with recursion).
