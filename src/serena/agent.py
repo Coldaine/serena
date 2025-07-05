@@ -927,10 +927,18 @@ class SerenaAgent:
         return list(self._modes)
 
     def create_system_prompt(self) -> str:
-        return self.prompt_factory.create_system_prompt(
+        system_prompt = self.prompt_factory.create_system_prompt(
             context_system_prompt=self._context.prompt,
             mode_system_prompts=[mode.prompt for mode in self._modes],
         )
+        
+        # Log the system prompt for verification (temporary debugging)
+        if "Tool Execution Guidelines" in system_prompt:
+            log.info("✓ Enhanced system prompt with tool execution guidelines is active")
+        else:
+            log.warning("⚠ Tool execution guidelines not found in system prompt")
+            
+        return system_prompt
 
     def _update_active_tools(self) -> None:
         """
