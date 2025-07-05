@@ -271,3 +271,8 @@ bower_components/
 venv*/
 env*/
 ENV*/
+
+# Test and monitoring logs
+async_tool_test.log
+mcp_communication_monitor.log
+health_data.json
