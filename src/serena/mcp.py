@@ -83,7 +83,9 @@ class SerenaMCPFactory:
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata()
-        is_async = False
+        # FIXED: Dynamically detect if this is an AsyncTool instead of hardcoding False
+        from serena.agent import AsyncTool
+        is_async = isinstance(tool, AsyncTool)
         parameters = func_arg_metadata.arg_model.model_json_schema()
 
         docstring = docstring_parser.parse(func_doc)
@@ -295,7 +297,9 @@ class SerenaMCPFactoryWithProcessIsolation(SerenaMCPFactory):
         func_name = tool.get_name()
         func_doc = tool.get_apply_docstring() or ""
         func_arg_metadata = tool.get_apply_fn_metadata()
-        is_async = False
+        # FIXED: Dynamically detect if this is an AsyncTool instead of hardcoding False
+        from serena.agent import AsyncTool
+        is_async = isinstance(tool, AsyncTool)
         parameters = func_arg_metadata.arg_model.model_json_schema()
 
         docstring = docstring_parser.parse(func_doc)

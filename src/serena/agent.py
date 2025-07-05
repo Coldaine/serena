@@ -55,6 +55,7 @@ from serena.dashboard import MemoryLogHandler, SerenaDashboardAPI
 from serena.prompt_factory import PromptFactory, SerenaPromptFactory
 from serena.symbol import SymbolManager
 from serena.text_utils import search_files
+from serena.async_tool_executor import AsyncToolExecutor, UnifiedToolDispatcher
 from serena.util.file_system import GitignoreParser, match_path, scan_directory
 from serena.util.general import load_yaml, save_yaml
 from serena.util.inspection import determine_programming_language_composition, iter_subclasses
@@ -800,6 +801,12 @@ class SerenaAgent:
         # create executor for starting the language server and running tools in another thread
         # This executor is used to achieve linear task execution, so it is important to use a single-threaded executor.
         self._task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SerenaAgentExecutor")
+        
+        # Initialize the AsyncToolExecutor for proper async tool handling
+        # This replaces the asyncio.run() anti-pattern with a background event loop
+        self._async_tool_executor = AsyncToolExecutor()
+        self._async_tool_executor.start()
+        self._unified_dispatcher = UnifiedToolDispatcher(self._async_tool_executor, self.serena_config.tool_timeout)
         self._task_executor_lock = threading.Lock()
         self._task_executor_task_index = 1
 
@@ -1190,6 +1197,9 @@ class SerenaAgent:
             log.info("Stopping the GUI log window ...")
             self._gui_log_handler.stop_viewer()
             Logger.root.removeHandler(self._gui_log_handler)
+        if hasattr(self, '_async_tool_executor') and self._async_tool_executor:
+            log.info("Stopping the AsyncToolExecutor ...")
+            self._async_tool_executor.stop()
 
 
 class Component(ABC):
@@ -1582,9 +1592,20 @@ class AsyncTool(Component, ToolInterface):
 
             return result
 
-        # Run the async task in the current event loop
-        future = self.agent.issue_task(lambda: asyncio.run(task()), name=self.__class__.__name__)
-        return future.result(timeout=self.agent.serena_config.tool_timeout)
+        # FIXED: Use the AsyncToolExecutor instead of asyncio.run() anti-pattern
+        # This eliminates the blocking behavior that was causing client hanging
+        if hasattr(self.agent, '_unified_dispatcher') and self.agent._unified_dispatcher:
+            # Use the new unified dispatcher for proper async execution
+            return self.agent._unified_dispatcher.dispatch_tool(
+                lambda **kwargs: task(), 
+                {}, 
+                timeout=self.agent.serena_config.tool_timeout
+            )
+        else:
+            # Fallback to old behavior if dispatcher not available (shouldn't happen in normal operation)
+            log.warning("AsyncToolExecutor not available, falling back to problematic asyncio.run() pattern")
+            future = self.agent.issue_task(lambda: asyncio.run(task()), name=self.__class__.__name__)
+            return future.result(timeout=self.agent.serena_config.tool_timeout)
 
 
 class RestartLanguageServerTool(Tool):
